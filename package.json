@@ -1,0 +1,14 @@
+{
+  "name": "xbox-live",
+  "version": "1.0.0",
+  "description": "Some scripts for extracting information from the Xbox Live store",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "casperjs": "^1.1.1"
+  }
+}
