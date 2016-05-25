@@ -2,3 +2,4 @@ node_modules/
 .vscode
 casperjs/gamelist.json
 xbox_live.db
+casperjs/gameinfo.json
