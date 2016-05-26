@@ -2,12 +2,9 @@ var sqlite3 = require('sqlite3').verbose();
 var fs = require('fs');
 var child_process = require('child_process');
 
-var gameDataJSON = fs.readFileSync('casperjs/gamelist.json');
-var gameData = JSON.parse(gameDataJSON);
-
 var db = new sqlite3.Database('xbox_live.db');
 
-function createTables() {
+function createTables(onError, onComplete) {
     db.serialize(function () {
         db.run("CREATE TABLE IF NOT EXISTS games(\
             id INTEGER PRIMARY KEY AUTOINCREMENT,\
@@ -29,28 +26,28 @@ function createTables() {
             date TEXT\
         )");
     });
+    
+    onComplete();
 }
 
-function doesGameListNeedUpdate() {
-    var timestamp = null;
-    
+function doesGameListNeedUpdate(onComplete) {  
     db.serialize(function () {
         db.all("SELECT date from timestamps WHERE name = 'gameList'", function (err, rows) {
+            var timestamp = null;
+            
             if (rows.length === 1) {
                 timestamp = new Date(rows[0].date);
             }
+            
+            if (!timestamp) {
+                onComplete(true);
+            }
+            var elapsedMs = Date.now() - timestamp;
+    
+            var elapsedHours = elapsedMs / 1000 / 60 / 60;
+            onComplete(elapsedHours > 24);
         });      
     });
-    
-    if (!timestamp) {
-        return true;
-    }
-    
-    var elapsedMs = Date.now() - timestamp;
-    
-    var elapsedHours = elapsedMs / 1000 / 60 / 60;
-    console.log(elapsedHours);
-    return elapsedHours > 24;
 }
 
 function updateTimestamp() {
@@ -60,56 +57,90 @@ function updateTimestamp() {
     });
 }
 
-function populateGameTable() {
-    if (!doesGameListNeedUpdate()) {
-        return;
-    }
-    
-    db.serialize(function () {      
-        db.run("UPDATE games SET available = 0");
+function populateGameTable(onError, onComplete) {
+    doesGameListNeedUpdate(function (needsUpdate) {
+        if (needsUpdate) {
+            child_process.execFileSync('../node_modules/casperjs/bin/casperjs', ['gamelist.js'], { cwd: 'casperjs', stdio: 'inherit' });
+            
+            var gameDataJSON = fs.readFileSync('casperjs/gamelist.json');
+            var gameData = JSON.parse(gameDataJSON);
+            
+            db.serialize(function () {      
+                db.run("UPDATE games SET available = 0");
+                
+                var gameInsert = db.prepare("\
+                    INSERT INTO games (name, url, available, lastUpdate) SELECT ?, ?, 1, NULL\
+                    WHERE NOT EXISTS(SELECT 1 FROM games WHERE url = ?2)\
+                ");
+                var gameUpdateAvailable = db.prepare("UPDATE games SET available = 1 WHERE url = ?");
+                
+                gameData.forEach(function (game) {
+                    gameInsert.run(game.name, game.url);
+                    gameUpdateAvailable.run(game.url);
+                });
+                gameUpdateAvailable.finalize();
+                gameInsert.finalize();
+            });
         
-        var gameInsert = db.prepare("\
-            INSERT INTO games (name, url, available, lastUpdate) SELECT ?, ?, 1, NULL\
-            WHERE NOT EXISTS(SELECT 1 FROM games WHERE url = ?2)\
-        ");
-        var gameUpdateAvailable = db.prepare("UPDATE games SET available = 1 WHERE url = ?");
-        
-        gameData.forEach(function (game) {
-            gameInsert.run(game.name, game.url);
-            gameUpdateAvailable.run(game.url);
-        });
-        gameUpdateAvailable.finalize();
-        gameInsert.finalize();
+            updateTimestamp();
+        }
+        onComplete();
     });
-    
-    updateTimestamp();
 }
 
-function createUrlList() {
-    var toUpdate = [];
-    
+function getPriceForGame(id, url) {
+    try {
+        child_process.execFileSync('../node_modules/casperjs/bin/casperjs', ['gameinfo.js', url], { cwd: 'casperjs', stdio: 'inherit' });
+    } catch (e) {
+        console.log("Failed to get price for URL: " + url);
+        return;
+    }
+
+    var gameInfoJSON = fs.readFileSync('casperjs/gameinfo.json');
+    var gameInfo = JSON.parse(gameInfoJSON);
+            
     db.serialize(function () {
-        db.all(
+        var date = new Date().toISOString();
+        db.run("INSERT INTO prices (gameId, price, date) SELECT ?, ?, ?", id, gameInfo.price, date);
+        db.run("UPDATE games SET lastUpdate = ? WHERE id = ?", date, id);
+    });
+}
+
+function createUrlList(onError, onComplete) {
+    db.serialize(function () {
+        db.each(
             "SELECT id, url FROM games\
             WHERE available = 1 AND (lastUpdate IS NULL OR julianday('now') - julianday(lastUpdate) >= 1)\
             ORDER BY datetime(lastUpdate) ASC\
-            LIMIT 10"
-        , function (err, rows) {
-            console.log('got here');
-            toUpdate = rows;
-        });
-    });
-    
-    console.log(toUpdate);
-    toUpdate.forEach(function (row) {
-        child_process.execFileSync('../node_modules/casperjs/bin/casperjs', ['gameinfo.js', row.url], { cwd: 'casperjs', stdio: 'inherit' });
-    });
+            LIMIT 50"
+        , function (err, row) {
+            getPriceForGame(row.id, row.url);
+        }, onComplete);
+    });    
 }
 
-createTables();
-populateGameTable();
-createUrlList();
+function run(taskList, cleanup) {
+    if (taskList.length === 0) {
+        cleanup();
+        return;
+    }
+    
+    var task = taskList.shift();
+    var onError = function (error) {
+        console.log(error);
+        cleanup();
+    };
+    
+    var onComplete = function () {
+        run(taskList, cleanup);
+    }
+    task(onError, onComplete);
+}
 
-//child_process.execFileSync('../node_modules/casperjs/bin/casperjs', ['gamelist.js'], { cwd: 'casperjs', stdio: 'inherit' });
+var tasks = [
+    createTables,
+    populateGameTable,
+    createUrlList    
+];
 
-db.close();
+run(tasks, function () { db.close(); });

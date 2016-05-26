@@ -41,5 +41,5 @@ casper.on('http.status.404', function (resource) {
 casper.run(function () {
     fs.write("gamelist.json", utils.serialize(result), 'w');
     //utils.dump(result);
-    casper.done();
+    this.exit();
 });
